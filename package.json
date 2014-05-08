@@ -12,6 +12,7 @@
     "jquery-extend": "^2.0.3",
     "bluebird": "^1.2.4",
     "msgpack": "^0.2.3",
-    "amqplib": "git+https://github.com/myndzi/amqp.node"
+    "amqplib": "git+https://github.com/myndzi/amqp.node",
+    "logger": "git+https://github.com/myndzi/logger"
   }
 }

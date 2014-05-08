@@ -2,16 +2,16 @@
 
 var util = require('util'),
     amqp = require('amqplib'),
+    Logger = require('logger'),
     extend = require('jquery-extend'),
     msgpack = require('msgpack'),
-    Promise = require('bluebird'),
-    EventEmitter = require('events').EventEmitter;
+    Promise = require('bluebird');
+
+var log = new Logger('Rabbit-worker', 'trace');
 
 module.exports = Worker;
 
 function Worker(config) {
-    EventEmitter.call(this);
-    
     this.connectString = util.format('amqp://%s:%s@%s:%d/%s',
         encodeURIComponent(config.user),
         encodeURIComponent(config.pass),
@@ -28,11 +28,11 @@ function Worker(config) {
     this.error = null; // set when setup() fails to prevent hammering
     this.asserted = false;
 }
-util.inherits(Worker, EventEmitter);
-Worker.prototype.consume = function (queue, fn, opts) {
+Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
     var self = this;
-    self.consumers.push([queue, fn, opts]);
     return self.getChannel().then(function (ch) {
+        log.silly('binding consumer: ', queue);
+        self.consumers.push([queue, fn, opts]);
         return ch.consume(queue, function (msg) {
             var deferred = Promise.defer(),
                 cancelled = null;
@@ -43,26 +43,28 @@ Worker.prototype.consume = function (queue, fn, opts) {
                 headers: msg.properties.headers,
                 cancel: function (reason) { return Promise.reject(cancelled = reason); }
             };
+            log.silly('consume callback');
             
             Promise.try(function () {
-                return fn.call(ctx, content);
+                return fn.call(ctx, ctx.content);
             }).then(function (res) {
                 // in case they called this.cancel but didn't return it
                 if (cancelled !== null) { throw new Error(cancelled); }
                 
-                if (headers.resolveKey) {
+                if (ctx.headers.resolveKey) {
                     return self.publish(
-                        headers.resolveKey,
+                        ctx.headers.resolveKey,
                         res,
-                        { headers: headers }
+                        { headers: ctx.headers }
                     );
                 }
             }).catch(function (err) {
-                if (headers.rejectKey) {
+                log.warn('Consumer failed:', err);
+                if (ctx.headers.rejectKey) {
                     return self.publish(
-                        headers.rejectKey,
+                        ctx.headers.rejectKey,
                         err,
-                        { headers: headers }
+                        { headers: ctx.headers }
                     );
                 } else {
                     throw err;
@@ -70,58 +72,96 @@ Worker.prototype.consume = function (queue, fn, opts) {
             }).catch(function (err) {
                 // no reject key specified, or publish rejection failed
                 delete ctx.cancel;
-                log.error('Error processing message', ctx);
+                log.error('Error processing message', err);
+                log.trace('Message:', ctx);
             }).finally(function () {
                 // allow the message to be removed from the queue, we've done everything we can
                 ch.ack(msg);
             });
         }, opts);
     });
-};
-Worker.prototype.publish = function (key, data, opts) {
+});
+Worker.prototype.publish = Promise.method(function (key, data, headers) {
     var self = this;
-    opts = extend({ }, {
+    
+    var opts = {
         contentType: 'application/x-msgpack',
         contentEncoding: 'binary',
-        retries: 0
-    }, opts);
+        headers: extend(true, {
+            'retries': 0,
+            'resolveKey': 'resolved',
+            'rejectKey': 'rejected'
+        }, headers)
+    };
+    log.trace('Worker.publish opts:', opts);
+    
+    
     return self.getChannel().then(function (ch) {
-        return ch.publish(self.exchange, key, msgpack.pack(data), opts);
+        log.silly('publish', {
+            exchange: self.exchange,
+            key: key,
+            data: data,
+            opts: opts
+        });
+        return ch.publish(
+            self.exchange,
+            key,
+            msgpack.pack(data),
+            opts
+        );
     });
-};
+});
 Worker.prototype.reset = function () {
     this.error = null;
 };
-Worker.prototype.setup = function () {
+Worker.prototype.setup = Promise.method(function () {
     var self = this,
         ch = self.channel,
         bindings = self.bindings,
         consumers = self.consumers;
     
-    if (self.error) { return Promise.reject(self.error); }
-        
-    return Promise.map(bindings, function (exchg) {
-        var queues = bindings[exchg].queues || [ ];
-        
+    if (self.error) {
+        self.log && self.log.warn('Attempting to set up previously failed connection', self.error);
+        throw self.error;
+    }
+    
+    log.info('worker.setup');
+    log.silly(bindings);
+    return Promise.map(Object.keys(bindings), function (exchg) {
+        var queues = Object.keys(bindings[exchg]) || [ ];
+        log.silly('asserting exchange', exchg);
+        log.trace('queues: ', queues);
         return ch
-            .assertExchange(exchg, bindings[exchg].type || 'direct')
+            .assertExchange(exchg, 'topic')
             .thenReturn(queues)
             .map(function (queue) {
+                log.trace('asserting queue', queue);
                 return ch.assertQueue(queue).thenReturn(queue);
             })
             .map(function (queue) {
-                return ch.bindQueue(queue, exchg, queues[queue]);
+                log.trace('binding queue', {
+                    exchange: exchg,
+                    key: bindings[exchg][queue],
+                    queue: queue
+                });
+                return ch.bindQueue(queue, exchg, bindings[exchg][queue]);
             });
     })
-    .thenReturn(consumers)
-    .map(self.consume.bind(self))
+    .then(function () {
+        log.silly('consumers: ', consumers.map(function (c) { return c[0]; }));
+        return Promise.settle(consumers.map(function (args) {
+            log.silly('re-binding');
+            return self.consume.apply(self, args);
+        }));
+    })
     .then(ch.recover.bind(ch))
     .catch(function (err) {
+        log.warn('error', err);
         self.error = err;
-    })
-    .return(self);
-};
-Worker.prototype.getConnection = function () {
+        throw err;
+    });
+});
+Worker.prototype.getConnection = Promise.method(function () {
     if (this.connection) { return this.connection; }
     var self = this,
         config = self.config;
@@ -138,8 +178,8 @@ Worker.prototype.getConnection = function () {
         self.connection = conn;
         return conn;
     }, errFn);
-};
-Worker.prototype.getChannel = function () {
+});
+Worker.prototype.getChannel = Promise.method(function () {
     if (this.channel) { return this.channel; }
     
     var self = this;
@@ -157,4 +197,4 @@ Worker.prototype.getChannel = function () {
         if (self.asserted) { return ch; }
         return self.setup().return(ch);
     }, errFn);
-};
+});
