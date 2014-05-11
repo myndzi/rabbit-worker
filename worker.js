@@ -113,10 +113,10 @@ Worker.prototype.publish = Promise.method(function (key, data, headers) {
 });
 Worker.prototype.reset = function () {
     this.error = null;
+    this.asserted = false;
 };
-Worker.prototype.setup = Promise.method(function () {
+Worker.prototype.setup = Promise.method(function (channel) {
     var self = this,
-        channel = self.channel,
         bindings = self.bindings,
         consumers = self.consumers;
     
@@ -132,26 +132,25 @@ Worker.prototype.setup = Promise.method(function () {
         log.silly('asserting exchange', exchg);
         log.trace('queues: ', queues);
         
-        return channel.then(function (ch) {
-            return ch
-                .assertExchange(exchg, 'topic')
-                .thenReturn(queues)
-                .map(function (queue) {
-                    log.trace('asserting queue', queue);
-                    return ch.assertQueue(queue);
-                })
-                .thenReturn(queues)
-                .map(function (queue) {
-                    log.trace('binding queue', {
-                        exchange: exchg,
-                        key: queue,
-                        queue: queue
-                    });
-                    return ch.bindQueue(queue, exchg, queue);
+        return channel
+            .assertExchange(exchg, 'topic')
+            .thenReturn(queues)
+            .map(function (queue) {
+                log.trace('asserting queue', queue);
+                return channel.assertQueue(queue);
+            })
+            .thenReturn(queues)
+            .map(function (queue) {
+                log.trace('binding queue', {
+                    exchange: exchg,
+                    key: queue,
+                    queue: queue
                 });
-        });
+                return channel.bindQueue(queue, exchg, queue);
+            });
     })
     .then(function () {
+        self.asserted = true;
         log.silly('consumers: ', consumers.map(function (c) { return c[0]; }));
         return Promise.settle(consumers.map(function (args) {
             log.silly('re-binding');
@@ -166,9 +165,10 @@ Worker.prototype.setup = Promise.method(function () {
     });
 });
 Worker.prototype.getConnection = Promise.method(function () {
-    if (this.connection) { return this.connection; }
-    var self = this,
-        config = self.config;
+    var self = this;
+    if (self.connection) { return self.connection; }
+    
+    var config = self.config;
     
     var errFn = function (err) {
         self.connection = null;
@@ -176,28 +176,29 @@ Worker.prototype.getConnection = Promise.method(function () {
         self.log && self.log.error('amqp connection error:', err);
     };
     
-    return amqp.connect(
-    ).then(function (conn) {
+    self.connection = amqp.connect().then(function (conn) {
         conn.on('error', errFn);
-        self.connection = conn;
         return conn;
     }, errFn);
+    return self.connection;
 });
 Worker.prototype.getChannel = Promise.method(function () {
-    if (this.channel) { return this.channel; }
-    
     var self = this;
+    if (self.channel) { return self.channel; }
+    
     var errFn = function (err) {
         self.channel = null;
         self.log && self.log.error('amqp channel error:', err);
     };
     
-    return this.channel = self.getConnection().then(function (conn) {
+    self.channel = self.getConnection().then(function (conn) {
         return conn.createChannel();
     }).then(function (ch) {
         ch.on('error', errFn);
         
         if (self.asserted) { return ch; }
-        return self.setup().return(ch);
+        return self.setup(ch);
     }, errFn);
+    
+    return self.channel;
 });
