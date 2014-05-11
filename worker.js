@@ -116,7 +116,7 @@ Worker.prototype.reset = function () {
 };
 Worker.prototype.setup = Promise.method(function () {
     var self = this,
-        ch = self.channel,
+        channel = self.channel,
         bindings = self.bindings,
         consumers = self.consumers;
     
@@ -128,24 +128,28 @@ Worker.prototype.setup = Promise.method(function () {
     log.info('worker.setup');
     log.silly(bindings);
     return Promise.map(Object.keys(bindings), function (exchg) {
-        var queues = Object.keys(bindings[exchg]) || [ ];
+        var queues = bindings[exchg] || [ ];
         log.silly('asserting exchange', exchg);
         log.trace('queues: ', queues);
-        return ch
-            .assertExchange(exchg, 'topic')
-            .thenReturn(queues)
-            .map(function (queue) {
-                log.trace('asserting queue', queue);
-                return ch.assertQueue(queue).thenReturn(queue);
-            })
-            .map(function (queue) {
-                log.trace('binding queue', {
-                    exchange: exchg,
-                    key: bindings[exchg][queue],
-                    queue: queue
+        
+        return channel.then(function (ch) {
+            return ch
+                .assertExchange(exchg, 'topic')
+                .thenReturn(queues)
+                .map(function (queue) {
+                    log.trace('asserting queue', queue);
+                    return ch.assertQueue(queue);
+                })
+                .thenReturn(queues)
+                .map(function (queue) {
+                    log.trace('binding queue', {
+                        exchange: exchg,
+                        key: queue,
+                        queue: queue
+                    });
+                    return ch.bindQueue(queue, exchg, queue);
                 });
-                return ch.bindQueue(queue, exchg, bindings[exchg][queue]);
-            });
+        });
     })
     .then(function () {
         log.silly('consumers: ', consumers.map(function (c) { return c[0]; }));
@@ -154,7 +158,7 @@ Worker.prototype.setup = Promise.method(function () {
             return self.consume.apply(self, args);
         }));
     })
-    .then(ch.recover.bind(ch))
+    .return(channel)
     .catch(function (err) {
         log.warn('error', err);
         self.error = err;
@@ -188,11 +192,10 @@ Worker.prototype.getChannel = Promise.method(function () {
         self.log && self.log.error('amqp channel error:', err);
     };
     
-    return self.getConnection().then(function (conn) {
+    return this.channel = self.getConnection().then(function (conn) {
         return conn.createChannel();
     }).then(function (ch) {
         ch.on('error', errFn);
-        self.channel = ch;
         
         if (self.asserted) { return ch; }
         return self.setup().return(ch);
