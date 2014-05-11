@@ -28,6 +28,7 @@ function Worker(config) {
     this.error = null; // set when setup() fails to prevent hammering
     this.asserted = false;
 }
+var jobRE = /\.job$/;
 Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
     var self = this;
     return self.getChannel().then(function (ch) {
@@ -35,7 +36,15 @@ Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
         self.consumers.push([queue, fn, opts]);
         return ch.consume(queue, function (msg) {
             var deferred = Promise.defer(),
-                cancelled = null;
+                cancelled = null,
+                routingKey = msg.fields.routingKey,
+                resolveKey, rejectKey;
+            
+            
+            if (jobRE.test(routingKey)) {
+                resolveKey = routingKey.slice(0, -3) + 'success';
+                rejectKey = routingKey.slice(0, -3) + 'failure';
+            }
             
             var ctx = {
                 fields: msg.fields,
@@ -51,18 +60,18 @@ Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
                 // in case they called this.cancel but didn't return it
                 if (cancelled !== null) { throw new Error(cancelled); }
                 
-                if (ctx.headers.resolveKey) {
+                if (resolveKey) {
                     return self.publish(
-                        ctx.headers.resolveKey,
+                        resolveKey,
                         res,
                         { headers: ctx.headers }
                     );
                 }
             }).catch(function (err) {
                 log.warn('Consumer failed:', err);
-                if (ctx.headers.rejectKey) {
+                if (rejectKey) {
                     return self.publish(
-                        ctx.headers.rejectKey,
+                        rejectKey,
                         err,
                         { headers: ctx.headers }
                     );
@@ -87,11 +96,7 @@ Worker.prototype.publish = Promise.method(function (key, data, headers) {
     var opts = {
         contentType: 'application/x-msgpack',
         contentEncoding: 'binary',
-        headers: extend(true, {
-            'retries': 0,
-            'resolveKey': 'resolved',
-            'rejectKey': 'rejected'
-        }, headers)
+        headers: extend(true, { 'retries': 0 }, headers)
     };
     log.trace('Worker.publish opts:', opts);
     
