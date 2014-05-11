@@ -1,6 +1,8 @@
 'use strict';
 
-var util = require('util'),
+var fs = require('fs'),
+    util = require('util'),
+    PATH = require('path'),
     amqp = require('amqplib'),
     Logger = require('logger'),
     extend = require('jquery-extend'),
@@ -12,7 +14,14 @@ var log = new Logger('Rabbit-worker', 'trace');
 module.exports = Worker;
 
 function Worker(config) {
-    this.connectString = util.format('amqp://%s:%s@%s:%d/%s',
+    if (config.ca) {
+        var caCert = fs.readFileSync(PATH.join(__dirname, config.ca));
+        config.secure = true;
+        this.caCert = caCert;
+    }
+
+    this.connectString = util.format('%s://%s:%s@%s:%d/%s?heartbeat=60',
+        config.secure ? 'amqps' : 'amqp',
         encodeURIComponent(config.user),
         encodeURIComponent(config.pass),
         config.host,
@@ -173,15 +182,16 @@ Worker.prototype.getConnection = Promise.method(function () {
     var self = this;
     if (self.connection) { return self.connection; }
     
-    var config = self.config;
-    
     var errFn = function (err) {
         self.connection = null;
         self.asserted = false;
-        self.log && self.log.error('amqp connection error:', err);
+        //self.log && self.log.error('amqp connection error:', err);
+        throw err;
     };
-    
-    self.connection = amqp.connect().then(function (conn) {
+
+    self.connection = amqp.connect(self.connectString, {
+        ca: [self.caCert]
+    }).then(function (conn) {
         conn.on('error', errFn);
         return conn;
     }, errFn);
@@ -194,6 +204,7 @@ Worker.prototype.getChannel = Promise.method(function () {
     var errFn = function (err) {
         self.channel = null;
         self.log && self.log.error('amqp channel error:', err);
+        throw err;
     };
     
     self.channel = self.getConnection().then(function (conn) {
