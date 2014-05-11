@@ -13,6 +13,7 @@
     "bluebird": "^1.2.4",
     "msgpack": "^0.2.3",
     "amqplib": "git+https://github.com/myndzi/amqp.node",
-    "logger": "git+https://github.com/myndzi/logger"
+    "logger": "git+https://github.com/myndzi/logger",
+    "riakpbc": "^1.4.0"
   }
 }

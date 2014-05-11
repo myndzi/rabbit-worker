@@ -73,7 +73,7 @@ Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
                     return self.publish(
                         resolveKey,
                         res,
-                        { headers: ctx.headers }
+                        ctx.headers
                     );
                 }
             }).catch(function (err) {
@@ -82,7 +82,7 @@ Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
                     return self.publish(
                         rejectKey,
                         err,
-                        { headers: ctx.headers }
+                        ctx.headers
                     );
                 } else {
                     throw err;
