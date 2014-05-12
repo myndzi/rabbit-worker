@@ -78,10 +78,12 @@ Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
                 }
             }).catch(function (err) {
                 log.warn('Consumer failed:', err);
+                
                 if (rejectKey) {
                     return self.publish(
                         rejectKey,
-                        err,
+                        { message: err.message,
+                          content: ctx.content},
                         ctx.headers
                     );
                 } else {
