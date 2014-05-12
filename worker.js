@@ -9,7 +9,7 @@ var fs = require('fs'),
     msgpack = require('msgpack'),
     Promise = require('bluebird');
 
-var log = new Logger('Rabbit-worker', 'trace');
+var log = new Logger('Rabbit-worker');
 
 module.exports = Worker;
 
