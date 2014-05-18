@@ -41,6 +41,10 @@ function Worker(config) {
     this.channel = null;
     this.error = null; // set when setup() fails to prevent hammering
     this.asserted = false;
+    
+    // keeping track of retry queues we've asserted so we don't
+    // spam asserts a bunch of messages fall through to the retry queue(s)
+    this._asserted = { };
 }
 var jobRE = /\.job$/;
 Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
@@ -82,9 +86,15 @@ Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
                     );
                 }
             }).catch(function (err) {
-                log.warn('Consumer failed:', err);
-                
-                if (rejectKey) {
+                var retry = ctx.headers.retry;
+                // if there is a retry header, it should be an array of
+                // delays to implement, in seconds, in ascending order
+                // e.g. [30, 300, 3600, 28800, 86400]
+                if (Array.isArray(retry) && retry.length) {
+                    log.warn('Consumer failed, retrying', err);
+                    return self.redeliver(msg, ctx)
+                } else if (rejectKey) {
+                    log.error('Consumer failed, rejecting', err);
                     return self.publish(
                         rejectKey,
                         { message: err.message,
@@ -106,29 +116,77 @@ Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
         }, opts);
     });
 });
-Worker.prototype.publish = Promise.method(function (key, data, headers) {
+// keeps track of queues we've asserted so as not to re-assert
+// them every time. this is in support of the 'redeliver' method
+// which works from a message header, so it is impossible to
+// assert the queues beforehand
+Worker.prototype.assertOnce = Promise.method(function (queueName, opts) {
+    var self = this;
+    if (self._asserted[queueName]) { return; }
+    return self.getChannel().then(function (ch) {
+        return ch.assertQueue(queueName, opts);
+    });
+});
+Worker.prototype.redeliver = Promise.method(function (msg, ctx) {
+    log.trace('Worker.redeliver()');
+    var self = this,
+        dly = ctx.headers.retry.shift(),
+        retryKey = 'retry.' + dly;
+    
+    // ensure the redelivery queue exists
+    return self.assertOnce('redelivery')
+    .then(function () {
+        // assert a queue for this specific delay length
+        // (ensures long delays don't hold up slow ones)
+        // the message will expire and be delivered to 
+        // the 'redelivery' queue
+        return self.assertOnce(retryKey, {
+            deadLetterExchange: '',
+            deadLetterRoutingKey: 'redelivery',
+            messageTtl: dly*1000
+        });
+    }).then(function () {
+        log.silly('Publishing to ' + retryKey);
+        return self.publish(
+            { exchange: '' },
+            retryKey,
+            { deliverTo: msg.fields.routingKey,
+              headers: ctx.headers,
+              content: ctx.content }
+        );  
+    });
+});
+Worker.prototype.publish = Promise.method(function (opts, key, data, headers) {
     var self = this;
     
-    var opts = {
+    if (typeof opts === 'string') {
+        headers = data;
+        data = key;
+        key = opts;
+        opts = {
+            exchange: self.exchange
+        };
+    }
+    
+    var msgOpts = {
         contentType: 'application/x-msgpack',
         contentEncoding: 'binary',
-        headers: extend(true, { 'retries': 0 }, headers)
+        headers: headers
     };
     log.trace('Worker.publish opts:', opts);
     
-    
     return self.getChannel().then(function (ch) {
         log.silly('publish', {
-            exchange: self.exchange,
+            exchange: opts.exchange,
             key: key,
             data: data,
-            opts: opts
+            msgOpts: msgOpts
         });
         return ch.publish(
-            self.exchange,
+            opts.exchange,
             key,
             msgpack.pack(data),
-            opts
+            msgOpts
         );
     });
 });
