@@ -28,6 +28,11 @@ function Worker(config) {
         config.port,
         encodeURIComponent(config.path)
     );
+    this.reconnect = config.reconnect || {
+        factor: 2,
+        max: 30000
+    };
+    this.reconnect.current = 0;
     this.log = config.log;
     this.exchange = config.exchange || '';
     this.bindings = config.bindings || { };
@@ -180,28 +185,60 @@ Worker.prototype.setup = Promise.method(function (channel) {
         throw err;
     });
 });
-Worker.prototype.getConnection = Promise.method(function () {
+Worker.prototype.getConnection = Promise.method(function (force) {
     var self = this;
-    if (self.connection) { return self.connection; }
     
-    var errFn = function (err) {
+    if (self.connection) {
+        if (!force) { return self.connection; }
+        
+        log.trace('Forcing reconnection');
+        if (self.connection.isResolved()) {
+            Promise.try(self.connection.value().close).catch(function () {});;
+        }
         self.connection = null;
         self.asserted = false;
-        //self.log && self.log.error('amqp connection error:', err);
-        throw err;
-    };
+    }
+    
+    var r = this.reconnect, delay = r.current;
+    r.current = Math.min(Math.max(delay,1) * r.factor, r.max);
 
-    self.connection = amqp.connect(self.connectString, {
-        ca: [self.caCert]
-    }).then(function (conn) {
-        conn.on('error', errFn);
-        return conn;
-    }, errFn);
+    if (delay) { log.silly('Delaying connection for ' + (delay/1000) + 's'); }
+    
+    self.connection = Promise.delay(delay).then(function () {
+        return amqp.connect(self.connectString, { ca: [self.caCert] })
+    }).tap(function (conn) {
+        log.silly('Connected successfully');
+        r.current = 0;
+        
+        conn.once('error', function (err) {
+            log.error('Disconnected from RabbitMQ server:', err);
+        });
+        conn.once('close', function () {
+            log.trace('Connection closed');
+            // if the connection closes, we want to reconnect and re-bind any
+            // consumers. Re-binding happens when a channel opens, so force
+            // a channel to open
+            self.getChannel(true);
+        });
+    }).catch(function (err) {
+        log.warn('Connection failed:', err);
+        // no forcing getChannel here because it's in the normal code flow
+        // on the way to that very thing
+        return self.getConnection(true);
+    });
     return self.connection;
 });
-Worker.prototype.getChannel = Promise.method(function () {
+Worker.prototype.getChannel = Promise.method(function (force) {
     var self = this;
-    if (self.channel) { return self.channel; }
+    if (self.channel) {
+        if (!force) { return self.channel; }
+        
+        log.trace('Forcing new channel');
+        if (self.channel.isResolved()) {
+            Promise.try(self.channel.value().close).catch(function () {});;
+        }
+        self.channel = null;
+    }
     
     var errFn = function (err) {
         self.channel = null;
@@ -209,14 +246,22 @@ Worker.prototype.getChannel = Promise.method(function () {
         throw err;
     };
     
-    self.channel = self.getConnection().then(function (conn) {
+    self.channel = self.getConnection(force).then(function (conn) {
         return conn.createChannel();
     }).then(function (ch) {
-        ch.on('error', errFn);
-        
+        ch.once('error', function (err) {
+            log.error('Channel error:', err);
+        });
+        ch.once('close', function () {
+            log.trace('Channel closed');
+            self.getChannel(true);
+        });
         if (self.asserted) { return ch; }
         return self.setup(ch);
-    }, errFn);
+    }).catch(function (err) {
+        log.warn('Create channel failed:', err);
+        return self.getChannel(true);
+    });
     
     return self.channel;
 });
