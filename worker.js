@@ -33,7 +33,7 @@ function Worker(config) {
         max: 30000
     };
     this.reconnect.current = 0;
-    this.log = config.log;
+    this.log = config.log || log;
     this.exchange = config.exchange || '';
     this.bindings = config.bindings || { };
     this.consumers = [ ];
@@ -50,7 +50,7 @@ var jobRE = /\.job$/;
 Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
     var self = this;
     return self.getChannel().then(function (ch) {
-        log.silly('binding consumer: ', queue);
+        self.log.silly('binding consumer: ', queue);
         self.consumers.push([queue, fn, opts]);
         return ch.consume(queue, function (msg) {
             var deferred = Promise.defer(),
@@ -70,7 +70,7 @@ Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
                 headers: msg.properties.headers,
                 cancel: function (reason) { return Promise.reject(cancelled = reason); }
             };
-            log.silly('consume callback');
+            self.log.silly('consume callback');
             
             Promise.try(function () {
                 return fn.call(ctx, ctx.content);
@@ -91,10 +91,10 @@ Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
                 // delays to implement, in seconds, in ascending order
                 // e.g. [30, 300, 3600, 28800, 86400]
                 if (Array.isArray(retry) && retry.length) {
-                    log.warn('Consumer failed, retrying', err);
+                    self.log.warn('Consumer failed, retrying', err);
                     return self.redeliver(msg, ctx)
                 } else if (rejectKey) {
-                    log.error('Consumer failed, rejecting', err);
+                    self.log.error('Consumer failed, rejecting', err);
                     return self.publish(
                         rejectKey,
                         { message: err.message,
@@ -107,8 +107,8 @@ Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
             }).catch(function (err) {
                 // no reject key specified, or publish rejection failed
                 delete ctx.cancel;
-                log.error('Error processing message', err);
-                log.trace('Message:', ctx);
+                self.log.error('Error processing message', err);
+                self.log.trace('Message:', ctx);
             }).finally(function () {
                 // allow the message to be removed from the queue, we've done everything we can
                 ch.ack(msg);
@@ -128,10 +128,11 @@ Worker.prototype.assertOnce = Promise.method(function (queueName, opts) {
     });
 });
 Worker.prototype.redeliver = Promise.method(function (msg, ctx) {
-    log.trace('Worker.redeliver()');
     var self = this,
         dly = ctx.headers.retry.shift(),
         retryKey = 'retry.' + dly;
+    
+    self.log.trace('Worker.redeliver()');
     
     // ensure the redelivery queue exists
     return self.assertOnce('redelivery')
@@ -146,7 +147,7 @@ Worker.prototype.redeliver = Promise.method(function (msg, ctx) {
             messageTtl: dly*1000
         });
     }).then(function () {
-        log.silly('Publishing to ' + retryKey);
+        self.log.silly('Publishing to ' + retryKey);
         return self.publish(
             { exchange: '' },
             retryKey,
@@ -173,10 +174,10 @@ Worker.prototype.publish = Promise.method(function (opts, key, data, headers) {
         contentEncoding: 'binary',
         headers: headers
     };
-    log.trace('Worker.publish opts:', opts);
+    self.log.trace('Worker.publish opts:', opts);
     
     return self.getChannel().then(function (ch) {
-        log.silly('publish', {
+        self.log.silly('publish', {
             exchange: opts.exchange,
             key: key,
             data: data,
@@ -204,23 +205,23 @@ Worker.prototype.setup = Promise.method(function (channel) {
         throw self.error;
     }
     
-    log.info('worker.setup');
-    log.silly(bindings);
+    self.log.info('worker.setup');
+    self.log.silly(bindings);
     return Promise.map(Object.keys(bindings), function (exchg) {
         var queues = bindings[exchg] || [ ];
-        log.silly('asserting exchange', exchg);
-        log.trace('queues: ', queues);
+        self.log.silly('asserting exchange', exchg);
+        self.log.trace('queues: ', queues);
         
         return channel
             .assertExchange(exchg, 'topic')
             .thenReturn(queues)
             .map(function (queue) {
-                log.trace('asserting queue', queue);
+                self.log.trace('asserting queue', queue);
                 return channel.assertQueue(queue);
             })
             .thenReturn(queues)
             .map(function (queue) {
-                log.trace('binding queue', {
+                self.log.trace('binding queue', {
                     exchange: exchg,
                     key: queue,
                     queue: queue
@@ -230,15 +231,15 @@ Worker.prototype.setup = Promise.method(function (channel) {
     })
     .then(function () {
         self.asserted = true;
-        log.silly('consumers: ', consumers.map(function (c) { return c[0]; }));
+        self.log.silly('consumers: ', consumers.map(function (c) { return c[0]; }));
         return Promise.settle(consumers.map(function (args) {
-            log.silly('re-binding');
+            self.log.silly('re-binding');
             return self.consume.apply(self, args);
         }));
     })
     .return(channel)
     .catch(function (err) {
-        log.warn('error', err);
+        self.log.warn('error', err);
         self.error = err;
         throw err;
     });
@@ -249,7 +250,7 @@ Worker.prototype.getConnection = Promise.method(function (force) {
     if (self.connection) {
         if (!force) { return self.connection; }
         
-        log.trace('Forcing reconnection');
+        self.log.trace('Forcing reconnection');
         if (self.connection.isResolved()) {
             Promise.try(self.connection.value().close).catch(function () {});;
         }
@@ -260,26 +261,26 @@ Worker.prototype.getConnection = Promise.method(function (force) {
     var r = this.reconnect, delay = r.current;
     r.current = Math.min(Math.max(delay,1) * r.factor, r.max);
 
-    if (delay) { log.silly('Delaying connection for ' + (delay/1000) + 's'); }
+    if (delay) { self.log.silly('Delaying connection for ' + (delay/1000) + 's'); }
     
     self.connection = Promise.delay(delay).then(function () {
         return amqp.connect(self.connectString, { ca: [self.caCert] })
     }).tap(function (conn) {
-        log.silly('Connected successfully');
+        self.log.silly('Connected successfully');
         r.current = 0;
         
         conn.once('error', function (err) {
-            log.error('Disconnected from RabbitMQ server:', err);
+            self.log.error('Disconnected from RabbitMQ server:', err);
         });
         conn.once('close', function () {
-            log.trace('Connection closed');
+            self.log.trace('Connection closed');
             // if the connection closes, we want to reconnect and re-bind any
             // consumers. Re-binding happens when a channel opens, so force
             // a channel to open
             self.getChannel(true);
         });
     }).catch(function (err) {
-        log.warn('Connection failed:', err);
+        self.log.warn('Connection failed:', err);
         // no forcing getChannel here because it's in the normal code flow
         // on the way to that very thing
         return self.getConnection(true);
@@ -291,7 +292,7 @@ Worker.prototype.getChannel = Promise.method(function (force) {
     if (self.channel) {
         if (!force) { return self.channel; }
         
-        log.trace('Forcing new channel');
+        self.log.trace('Forcing new channel');
         if (self.channel.isResolved()) {
             Promise.try(self.channel.value().close).catch(function () {});;
         }
@@ -308,16 +309,16 @@ Worker.prototype.getChannel = Promise.method(function (force) {
         return conn.createChannel();
     }).then(function (ch) {
         ch.once('error', function (err) {
-            log.error('Channel error:', err);
+            self.log.error('Channel error:', err);
         });
         ch.once('close', function () {
-            log.trace('Channel closed');
+            self.log.trace('Channel closed');
             self.getChannel(true);
         });
         if (self.asserted) { return ch; }
         return self.setup(ch);
     }).catch(function (err) {
-        log.warn('Create channel failed:', err);
+        self.log.warn('Create channel failed:', err);
         return self.getChannel(true);
     });
     
