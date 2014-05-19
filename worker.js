@@ -69,34 +69,25 @@ Worker.prototype.consume = Promise.method(function (queue, opts, fn) {
         });
     });
 });
-Worker.prototype.publish = Promise.method(function (opts, key, data, headers) {
+Worker.prototype.publish = Promise.method(function (key, data, headers) {
     var self = this;
-    
-    if (typeof opts === 'string') {
-        headers = data;
-        data = key;
-        key = opts;
-        opts = {
-            exchange: self.exchange
-        };
-    }
     
     var msgOpts = {
         contentType: 'application/x-msgpack',
         contentEncoding: 'binary',
         headers: headers
     };
-    self.log.trace('Worker.publish opts:', opts);
+    self.log.trace('Worker.publish');
     
     return self.getChannel().then(function (ch) {
-        self.log.silly('publish', {
-            exchange: opts.exchange,
+        self.log.trace({
+            exchange: self.exchange,
             key: key,
             data: data,
             msgOpts: msgOpts
         });
         return ch.publish(
-            opts.exchange,
+            self.exchange,
             key,
             msgpack.pack(data),
             msgOpts

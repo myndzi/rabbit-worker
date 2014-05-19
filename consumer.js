@@ -43,8 +43,14 @@ Consumer.prototype.bind = Promise.method(function (queue) {
         throw new Error('Consumer.bind(): already bound');
     }
     
-    ch.once('error', function () { self.state = 'error'; });
-    ch.once('close', self.reset.bind(self));
+    ch.once('error', function (err) {
+        log.warn('Channel error:', err);
+        self.state = 'error';
+    });
+    ch.once('close', function () {
+        log.warn('Channel closed');
+        self.reset();
+    });
     
     self.state = 'binding';
     return ch.consume(queue, self.consumeHandler.bind(self), self.opts)
@@ -86,6 +92,7 @@ Consumer.prototype.consumeHandler = function (msg) {
         self.log.trace('Consumer callback resolved: ' + res);
         return { state: 'resolved', value: res };
     }).catch(function (err) {
+        self.log.warn('Problem:', err);
         // if failed but message is set for retries, do that
         if (Array.isArray(headers.retry) && headers.retry.length) {
             self.log.trace('Message queued for redelivery');
@@ -127,7 +134,7 @@ Consumer.prototype.consumeHandler = function (msg) {
 Consumer.prototype.assertOnce = Promise.method(function (queueName, opts) {
     var self = this;
     if (self.asserted[queueName]) { return; }
-    self.ch.assertQueue(queueName, opts).then(function () {
+    self.channel.assertQueue(queueName, opts).then(function () {
         self.asserted[queueName] = true;
     });
 });
@@ -151,11 +158,9 @@ Consumer.prototype.redeliver = Promise.method(function (msg, ctx) {
         });
     }).then(function () {
         self.log.silly('Publishing to ' + retryKey);
-        return self.ch.publish('', retryKey, msgPack.pack({
+        return self.channel.publish('', retryKey, msg.content, {
             deliverTo: msg.fields.routingKey,
-            headers: headers,
-            content: msg.content
-        }), {
+            origHeaders: JSON.stringify(headers),
             contentType: 'application/x-msgpack',
             contentEncoding: 'binary'
         });
