@@ -103,7 +103,7 @@ Consumer.prototype.consumeHandler = function (msg) {
         if (Array.isArray(headers.retry) && headers.retry.length) {
             self.log.trace('Message queued for redelivery');
             reply = false;
-            return self.redeliver(content);
+            return self.redeliver(content, ctx);
         } else {
             self.log.trace('Consumer callback rejected:', err);
             return { state: 'rejected', value: err };
