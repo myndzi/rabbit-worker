@@ -87,7 +87,13 @@ Consumer.prototype.consumeHandler = function (msg) {
     return Promise.try(function () {
         // run the supplied callback handler, it may return a promise
         // or throw/return a value
-        return self.fn.call(thisArg, ctx.content, ctx);
+        if (content.value && content.state) {
+            // if it's a deferred message, convert it to a resolved or rejected promise
+            if (content.state === 'resolved') { return self.fn.call(Promise.resolve(content.value)); }
+            if (content.state === 'rejected') { return self.fn.call(Promise.reject(content.value)); }
+        }
+
+        return self.fn.call(thisArg, content, ctx);
     }).then(function (res) {
         self.log.trace('Consumer callback resolved: ' + res);
         return { state: 'resolved', value: res };
