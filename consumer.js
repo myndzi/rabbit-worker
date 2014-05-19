@@ -103,7 +103,7 @@ Consumer.prototype.consumeHandler = function (msg) {
         if (Array.isArray(headers.retry) && headers.retry.length) {
             self.log.trace('Message queued for redelivery');
             reply = false;
-            return self.redeliver(msg);
+            return self.redeliver(content);
         } else {
             self.log.trace('Consumer callback rejected:', err);
             return { state: 'rejected', value: err };
@@ -144,8 +144,8 @@ Consumer.prototype.assertOnce = Promise.method(function (queueName, opts) {
         self.asserted[queueName] = true;
     });
 });
-Consumer.prototype.redeliver = Promise.method(function (msg, ctx) {
-    var self = this, headers = msg.properties.headers;
+Consumer.prototype.redeliver = Promise.method(function (content, ctx) {
+    var self = this, headers = ctx.msg.properties.headers;
     var dly = headers.retry.shift(), retryKey = 'retry.' + dly;
     
     self.log.trace('Consumer.redeliver()');
@@ -164,9 +164,11 @@ Consumer.prototype.redeliver = Promise.method(function (msg, ctx) {
         });
     }).then(function () {
         self.log.silly('Publishing to ' + retryKey);
-        return self.channel.publish('', retryKey, msg.content, {
-            deliverTo: msg.fields.routingKey,
-            origHeaders: JSON.stringify(headers),
+        return self.channel.publish('', retryKey, msgpack.pack({
+            deliverTo: ctx.msg.fields.routingKey,
+            origHeaders: ctx.headers,
+            content: content
+        }), {
             contentType: 'application/x-msgpack',
             contentEncoding: 'binary'
         });
