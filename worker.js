@@ -7,13 +7,17 @@ var fs = require('fs'),
     Logger = require('logger'),
     extend = require('jquery-extend'),
     msgpack = require('msgpack'),
-    Promise = require('bluebird');
+    Promise = require('bluebird'),
+    Consumer = require('./consumer'),
+    EventEmitter = require('events').EventEmitter;
 
 var log = new Logger('Rabbit-worker');
 
 module.exports = Worker;
 
 function Worker(config) {
+    EventEmitter.call(this);
+    
     if (config.ca) {
         var caCert = fs.readFileSync(PATH.join(__dirname, config.ca));
         config.secure = true;
@@ -28,11 +32,13 @@ function Worker(config) {
         config.port,
         encodeURIComponent(config.path)
     );
+    this.controlKeys = config.controlKeys || [ ];
     this.reconnect = config.reconnect || {
         factor: 2,
         max: 30000
     };
     this.reconnect.current = 0;
+    this.prefetch = config.prefetch || 0;
     this.log = config.log || log;
     this.exchange = config.exchange || '';
     this.bindings = config.bindings || { };
@@ -41,120 +47,26 @@ function Worker(config) {
     this.channel = null;
     this.error = null; // set when setup() fails to prevent hammering
     this.asserted = false;
-    
-    // keeping track of retry queues we've asserted so we don't
-    // spam asserts a bunch of messages fall through to the retry queue(s)
-    this._asserted = { };
 }
+util.inherits(Worker, EventEmitter);
+
 var jobRE = /\.job$/;
-Worker.prototype.consume = Promise.method(function (queue, fn, opts) {
+Worker.prototype.consume = Promise.method(function (queue, opts, fn) {
+    if (typeof opts === 'function') { fn = opts; opts = { }; }
     var self = this;
     return self.getChannel().then(function (ch) {
         self.log.silly('binding consumer: ', queue);
-        self.consumers.push([queue, fn, opts]);
-        return ch.consume(queue, function (msg) {
-            var deferred = Promise.defer(),
-                cancelled = null,
-                routingKey = msg.fields.routingKey,
-                resolveKey, rejectKey;
-            
-            
-            if (jobRE.test(routingKey)) {
-                resolveKey = routingKey.slice(0, -3) + 'success';
-                rejectKey = routingKey.slice(0, -3) + 'failure';
-            }
-            
-            var ctx = {
-                fields: msg.fields,
-                content: msgpack.unpack(msg.content),
-                headers: msg.properties.headers,
-                cancel: function (reason) { return Promise.reject(cancelled = reason); }
-            };
-            self.log.silly('consume callback');
-            
-            Promise.try(function () {
-                return fn.call(ctx, ctx.content);
-            }).then(function (res) {
-                // in case they called this.cancel but didn't return it
-                if (cancelled !== null) { throw new Error(cancelled); }
-                
-                if (resolveKey) {
-                    return self.publish(
-                        resolveKey,
-                        res,
-                        ctx.headers
-                    );
-                }
-            }).catch(function (err) {
-                var retry = ctx.headers.retry;
-                // if there is a retry header, it should be an array of
-                // delays to implement, in seconds, in ascending order
-                // e.g. [30, 300, 3600, 28800, 86400]
-                if (Array.isArray(retry) && retry.length) {
-                    self.log.warn('Consumer failed, retrying', err);
-                    return self.redeliver(msg, ctx)
-                } else if (rejectKey) {
-                    self.log.error('Consumer failed, rejecting', err);
-                    return self.publish(
-                        rejectKey,
-                        { message: err.message,
-                          content: ctx.content},
-                        ctx.headers
-                    );
-                } else {
-                    throw err;
-                }
-            }).catch(function (err) {
-                // no reject key specified, or publish rejection failed
-                delete ctx.cancel;
-                self.log.error('Error processing message', err);
-                self.log.trace('Message:', ctx);
-            }).finally(function () {
-                // allow the message to be removed from the queue, we've done everything we can
-                ch.ack(msg);
-            });
-        }, opts);
-    });
-});
-// keeps track of queues we've asserted so as not to re-assert
-// them every time. this is in support of the 'redeliver' method
-// which works from a message header, so it is impossible to
-// assert the queues beforehand
-Worker.prototype.assertOnce = Promise.method(function (queueName, opts) {
-    var self = this;
-    if (self._asserted[queueName]) { return; }
-    return self.getChannel().then(function (ch) {
-        return ch.assertQueue(queueName, opts);
-    });
-});
-Worker.prototype.redeliver = Promise.method(function (msg, ctx) {
-    var self = this,
-        dly = ctx.headers.retry.shift(),
-        retryKey = 'retry.' + dly;
-    
-    self.log.trace('Worker.redeliver()');
-    
-    // ensure the redelivery queue exists
-    return self.assertOnce('redelivery')
-    .then(function () {
-        // assert a queue for this specific delay length
-        // (ensures long delays don't hold up slow ones)
-        // the message will expire and be delivered to 
-        // the 'redelivery' queue
-        return self.assertOnce(retryKey, {
-            deadLetterExchange: '',
-            deadLetterRoutingKey: 'redelivery',
-            messageTtl: dly*1000
+        
+        var consumer = new Consumer(fn, {
+            opts: opts.consumeOpts,
+            channel: ch,
+            exchange: self.exchange,
+            replyKey: opts.replyKey,
+            log: self.log
         });
-    }).then(function () {
-        self.log.silly('Publishing to ' + retryKey);
-        return self.publish(
-            { exchange: '' },
-            retryKey,
-            { deliverTo: msg.fields.routingKey,
-              headers: ctx.headers,
-              content: ctx.content }
-        );  
+        return consumer.bind(queue).then(function () {
+            self.consumers.push(consumer);
+        });
     });
 });
 Worker.prototype.publish = Promise.method(function (opts, key, data, headers) {
@@ -212,8 +124,13 @@ Worker.prototype.setup = Promise.method(function (channel) {
         self.log.silly('asserting exchange', exchg);
         self.log.trace('queues: ', queues);
         
+        if (self.prefetch) { channel.prefetch(self.prefetch); }
         return channel
             .assertExchange(exchg, 'topic')
+            .then(function () {
+                self.log.trace('control keys:', self.controlKeys);
+                return self.setupControlChannel(channel);
+            })
             .thenReturn(queues)
             .map(function (queue) {
                 self.log.trace('asserting queue', queue);
@@ -242,6 +159,37 @@ Worker.prototype.setup = Promise.method(function (channel) {
         self.log.warn('error', err);
         self.error = err;
         throw err;
+    });
+});
+Worker.prototype.setupControlChannel = Promise.method(function (ch) {
+    var self = this;
+    self.log.trace('setupControlChannel()');
+    if (!Array.isArray(self.controlKeys) || !self.controlKeys.length) { return; }
+
+    return ch.assertQueue(null, {
+        exclusive: true,
+        autoDelete: true
+    }).tap(function (res) {
+        return Promise.map(self.controlKeys, function (key) {
+            log.trace('Bound queue: ', [self.exchange, key, res.queue]);
+            return ch.bindQueue(res.queue, self.exchange, key);
+        });
+    }).then(function (res) {
+        ch.consume(res.queue, function (msg) {
+            var headers = msg.properties.headers,
+                content = msgpack.unpack(msg.content),
+                fields = msg.fields;
+            
+            if (headers.event) {
+                log.silly('Emitting event from message', {
+                    headers: headers,
+                    content: content,
+                    fields: fields
+                });
+                self.emit(headers.event, content, headers, fields);
+            }
+            ch.ack(msg);
+        });
     });
 });
 Worker.prototype.getConnection = Promise.method(function (force) {
@@ -312,6 +260,7 @@ Worker.prototype.getChannel = Promise.method(function (force) {
             self.log.error('Channel error:', err);
         });
         ch.once('close', function () {
+            ch.removeAllListeners();
             self.log.trace('Channel closed');
             self.getChannel(true);
         });
