@@ -86,17 +86,17 @@ Consumer.prototype.consumeHandler = function (msg) {
     };
     
     return Promise.try(function () {
-        // run the supplied callback handler, it may return a promise
-        // or throw/return a value
         if (content.value && content.state) {
             // if it's a deferred message, convert it to a resolved or rejected promise
             if (content.state === 'resolved') { return self.fn.call(thisArg, Promise.resolve(content.value)); }
             if (content.state === 'rejected') { return self.fn.call(thisArg, Promise.reject(content.value)); }
         }
 
+        // run the supplied callback handler, it may return a promise
+        // or throw/return a value
         return self.fn.call(thisArg, content, ctx);
     }).then(function (res) {
-        self.log.trace('Consumer callback resolved: ' + res);
+        self.log.trace('Consumer callback resolved: ', res);
         return { state: 'resolved', value: res };
     }).catch(function (err) {
         self.log.warn('Problem:', err);
@@ -116,7 +116,7 @@ Consumer.prototype.consumeHandler = function (msg) {
             return;
         }
         
-        self.log.trace('Publishing reply');
+        self.log.trace('Publishing reply', res);
         return ch.publish(
             self.exchange,
             self.replyKey,
