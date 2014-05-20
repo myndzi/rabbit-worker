@@ -86,7 +86,7 @@ Worker.prototype.bind = Promise.method(function (keys, fn, ch) {
                 return ch.bindQueue(res.queue, self.exchange, key);
             });
         }).then(function (res) {
-            ch.consume(res.queue, function (msg) {
+            return ch.consume(res.queue, function (msg) {
                 var headers = msg.properties.headers,
                     content = msgpack.unpack(msg.content),
                     fields = msg.fields;
