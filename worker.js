@@ -69,6 +69,41 @@ Worker.prototype.consume = Promise.method(function (queue, opts, fn) {
         });
     });
 });
+Worker.prototype.bind = Promise.method(function (keys, fn, ch) {
+    var self = this;
+    if (!Array.isArray(keys)) { keys = [ keys ]; }
+    self.log.silly('Binding temporary consumer: ', keys);
+    return Promise.try(function () {
+        return ch || self.getChannel();
+    }).then(function (ch) {
+        return ch.assertQueue(null, {
+            exclusive: true,
+            autoDelete: true
+        }).tap(function (res) {
+            self.log.trace('Created temporary queue: ' + res.queue);
+            return Promise.map(keys, function (key) {
+                self.log.trace('Binding: ' +  key);
+                return ch.bindQueue(res.queue, self.exchange, key);
+            });
+        }).then(function (res) {
+            ch.consume(res.queue, function (msg) {
+                var headers = msg.properties.headers,
+                    content = msgpack.unpack(msg.content),
+                    fields = msg.fields;
+                
+                self.log.trace('.bind callback:', {
+                    content: content,
+                    headers: headers,
+                    fields: fields
+                });
+                    
+                fn(content, headers, fields);
+                
+                ch.ack(msg);
+            });
+        });
+    });
+});
 Worker.prototype.publish = Promise.method(function (key, data, headers) {
     var self = this;
     
@@ -110,32 +145,36 @@ Worker.prototype.setup = Promise.method(function (channel) {
     
     self.log.info('worker.setup');
     self.log.silly(bindings);
-    return Promise.map(Object.keys(bindings), function (exchg) {
-        var queues = bindings[exchg] || [ ];
-        self.log.silly('asserting exchange', exchg);
-        self.log.trace('queues: ', queues);
-        
-        if (self.prefetch) { channel.prefetch(self.prefetch); }
-        return channel
-            .assertExchange(exchg, 'topic')
-            .then(function () {
-                self.log.trace('control keys:', self.controlKeys);
-                return self.setupControlChannel(channel);
-            })
-            .thenReturn(queues)
-            .map(function (queue) {
-                self.log.trace('asserting queue', queue);
-                return channel.assertQueue(queue);
-            })
-            .thenReturn(queues)
-            .map(function (queue) {
-                self.log.trace('binding queue', {
-                    exchange: exchg,
-                    key: queue,
-                    queue: queue
+    return Promise.try(function () {
+        if (self.controlKeys) {
+            self.log.trace('control keys:', self.controlKeys);
+            return self.setupControlChannel(channel);
+        }
+    })
+    .then(function () {
+        return Promise.map(Object.keys(bindings), function (exchg) {
+            var queues = bindings[exchg] || [ ];
+            self.log.silly('asserting exchange', exchg);
+            self.log.trace('queues: ', queues);
+            
+            if (self.prefetch) { channel.prefetch(self.prefetch); }
+            return channel
+                .assertExchange(exchg, 'topic')
+                .thenReturn(queues)
+                .map(function (queue) {
+                    self.log.trace('asserting queue', queue);
+                    return channel.assertQueue(queue);
+                })
+                .thenReturn(queues)
+                .map(function (queue) {
+                    self.log.trace('binding queue', {
+                        exchange: exchg,
+                        key: queue,
+                        queue: queue
+                    });
+                    return channel.bindQueue(queue, exchg, queue);
                 });
-                return channel.bindQueue(queue, exchg, queue);
-            });
+        });
     })
     .then(function () {
         self.asserted = true;
@@ -157,31 +196,17 @@ Worker.prototype.setupControlChannel = Promise.method(function (ch) {
     self.log.trace('setupControlChannel()');
     if (!Array.isArray(self.controlKeys) || !self.controlKeys.length) { return; }
 
-    return ch.assertQueue(null, {
-        exclusive: true,
-        autoDelete: true
-    }).tap(function (res) {
-        return Promise.map(self.controlKeys, function (key) {
-            log.trace('Bound queue: ', [self.exchange, key, res.queue]);
-            return ch.bindQueue(res.queue, self.exchange, key);
-        });
-    }).then(function (res) {
-        ch.consume(res.queue, function (msg) {
-            var headers = msg.properties.headers,
-                content = msgpack.unpack(msg.content),
-                fields = msg.fields;
-            
-            if (headers.event) {
-                log.silly('Emitting event from message', {
-                    headers: headers,
-                    content: content,
-                    fields: fields
-                });
-                self.emit(headers.event, content, headers, fields);
-            }
-            ch.ack(msg);
-        });
-    });
+    var doEvent = function (content, headers, fields) {
+        if (headers.event) {
+            log.silly('Emitting event from message', {
+                headers: headers,
+                content: content,
+                fields: fields
+            });
+            self.emit(headers.event, content, headers, fields);
+        }
+    };
+    return self.bind(self.controlKeys, doEvent, ch);
 });
 Worker.prototype.getConnection = Promise.method(function (force) {
     var self = this;

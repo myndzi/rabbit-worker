@@ -44,11 +44,11 @@ Consumer.prototype.bind = Promise.method(function (queue) {
     }
     
     ch.once('error', function (err) {
-        log.warn('Channel error:', err);
+        self.log.warn('Channel error:', err);
         self.state = 'error';
     });
     ch.once('close', function () {
-        log.warn('Channel closed');
+        self.log.warn('Channel closed');
         self.reset();
     });
     
