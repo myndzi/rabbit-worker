@@ -2,7 +2,7 @@
 
 var Promise = require('bluebird'),
     msgpack = require('msgpack'),
-    extend = require('jquery-extend'),
+    deepcopy = require('deepcopy'),
     util = require('util');
 
 module.exports = Consumer;
@@ -96,8 +96,8 @@ Consumer.prototype.consumeHandler = function (msg) {
         // clone the values so the handler can't modify them
         // TODO: look over this flow with consideration for redeliveries
         // and avoid this step
-        var _content = extend(true, { }, content),
-            _ctx = extend(true, { }, ctx);
+        var _content = deepcopy(content),
+            _ctx = deepcopy(ctx);
             
         // run the supplied callback handler, it may return a promise
         // or throw/return a value
