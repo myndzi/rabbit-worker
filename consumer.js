@@ -2,6 +2,7 @@
 
 var Promise = require('bluebird'),
     msgpack = require('msgpack'),
+    extend = require('jquery-extend'),
     util = require('util');
 
 module.exports = Consumer;
@@ -92,9 +93,15 @@ Consumer.prototype.consumeHandler = function (msg) {
             if (content.state === 'rejected') { return self.fn.call(thisArg, Promise.reject(content.value)); }
         }
 
+        // clone the values so the handler can't modify them
+        // TODO: look over this flow with consideration for redeliveries
+        // and avoid this step
+        var _content = extend(true, { }, content),
+            _ctx = extend(true, { }, ctx);
+            
         // run the supplied callback handler, it may return a promise
         // or throw/return a value
-        return self.fn.call(thisArg, content, ctx);
+        return self.fn.call(thisArg, _content, _ctx);
     }).then(function (res) {
         self.log.trace('Consumer callback resolved: ', res);
         return { state: 'resolved', value: res };
