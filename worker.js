@@ -32,6 +32,7 @@ function Worker(config) {
         config.port,
         encodeURIComponent(config.path)
     );
+    log.trace('connectString: ' + this.connectString);
     this.controlKeys = config.controlKeys || [ ];
     this.reconnect = config.reconnect || {
         factor: 2,
