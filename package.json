@@ -12,9 +12,8 @@
     "amqplib": "git+ssh://git@github.com/myndzi/amqp.node",
     "bluebird": "^1.2.4",
     "deepcopy": "^0.3.3",
-    "jquery-extend": "^2.0.3",
     "logger": "git+ssh://git@github.com/myndzi/logger",
     "msgpack": "^0.2.3",
-    "riakpbc": "^1.4.0"
+    "jquery-extend": "^2.0.3"
   }
 }
