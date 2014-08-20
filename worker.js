@@ -211,16 +211,42 @@ Worker.prototype.setupControlChannel = Promise.method(function (ch) {
 });
 Worker.prototype.getConnection = Promise.method(function (force) {
     var self = this;
+
+    var connecting = !!self.connection, // or connected
+        connected = connecting && self.connection.isResolved();
     
-    if (self.connection) {
-        if (!force) { return self.connection; }
+    if (connecting && !connected || connected && !force) {
+        return self.connection;
+    }
+    
+    function _error(err) {
+        self.log.error('Disconnected from RabbitMQ server:', err);
+    }
+    function _close() {
+        // if the connection closes, we want to reconnect and re-bind any
+        // consumers. Re-binding happens when a channel opens, so force
+        // a channel to open
+        self.log.trace('Connection closed unexpectedly, reconnecting');
+        self.getConnection(true);
+    }
         
+    if (connected && force) {
         self.log.trace('Forcing reconnection');
-        if (self.connection.isResolved()) {
-            Promise.try(self.connection.value().close).catch(function () {});;
-        }
+        
+        var conn = self.connection.value();
+        
+        conn.removeListener('error', _error);
+        conn.removeListener('close', _close);
+        
         self.connection = null;
         self.asserted = false;
+        
+        conn.close()
+        .catch(function (err) {
+            log.error('Couldn\'t close connection:', err);
+        });
+        
+        return self.getConnection();
     }
     
     var r = this.reconnect, delay = r.current;
@@ -234,16 +260,8 @@ Worker.prototype.getConnection = Promise.method(function (force) {
         self.log.silly('Connected successfully');
         r.current = 0;
         
-        conn.once('error', function (err) {
-            self.log.error('Disconnected from RabbitMQ server:', err);
-        });
-        conn.once('close', function () {
-            self.log.trace('Connection closed');
-            // if the connection closes, we want to reconnect and re-bind any
-            // consumers. Re-binding happens when a channel opens, so force
-            // a channel to open
-            self.getChannel(true);
-        });
+        conn.once('error', _error);
+        conn.once('close', _close);
     }).catch(function (err) {
         self.log.warn('Connection failed:', err);
         // no forcing getChannel here because it's in the normal code flow
@@ -254,38 +272,57 @@ Worker.prototype.getConnection = Promise.method(function (force) {
 });
 Worker.prototype.getChannel = Promise.method(function (force) {
     var self = this;
-    if (self.channel) {
-        if (!force) { return self.channel; }
-        
-        self.log.trace('Forcing new channel');
-        if (self.channel.isResolved()) {
-            Promise.try(self.channel.value().close).catch(function () {});;
-        }
-        self.channel = null;
+    
+    var opening = !!self.channel, // or opened
+        opened = self.channel.isResolved();
+    
+    if (opening && !opened || opened && !force) {
+        return self.channel;
     }
     
-    var errFn = function (err) {
+    function _error(err) {
+        self.log.error('Channel error:', err);
         self.channel = null;
-        self.log && self.log.error('amqp channel error:', err);
-        throw err;
-    };
+        self.getChannel();
+    }
+    function _close() {
+        self.log.trace('Channel closed unexpectedly, reopening');
+        self.getChannel(true);
+    }
+    
+    if (opened && force) {
+        self.log.trace('Forcing new channel');
+        
+        var ch = self.channel.value();
+        
+        ch.removeListener('error', _error);
+        ch.removeListener('close', _close);
+        
+        self.channel = null;
+        
+        ch.close()
+        .catch(function (err) {
+            log.error('Couldn\'t close channel:', err);
+        });
+        
+        return self.getChannel();
+    }
     
     self.channel = self.getConnection(force).then(function (conn) {
         return conn.createChannel();
     }).then(function (ch) {
-        ch.once('error', function (err) {
-            self.log.error('Channel error:', err);
-        });
-        ch.once('close', function () {
-            ch.removeAllListeners();
-            self.log.trace('Channel closed');
-            self.getChannel(true);
-        });
+        ch.once('error', _error);
+        ch.once('close', _close);
+        
         if (self.asserted) { return ch; }
         return self.setup(ch);
     }).catch(function (err) {
         self.log.warn('Create channel failed:', err);
-        return self.getChannel(true);
+        
+        return self.getConnection(true)
+        .then(function () {
+            return self.getChannel();
+        });
     });
     
     return self.channel;
