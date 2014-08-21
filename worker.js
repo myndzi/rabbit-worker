@@ -274,7 +274,7 @@ Worker.prototype.getChannel = Promise.method(function (force) {
     var self = this;
     
     var opening = !!self.channel, // or opened
-        opened = self.channel.isResolved();
+        opened = opening && self.channel.isResolved();
     
     if (opening && !opened || opened && !force) {
         return self.channel;
