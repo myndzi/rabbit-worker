@@ -212,118 +212,144 @@ Worker.prototype.setupControlChannel = Promise.method(function (ch) {
 Worker.prototype.getConnection = Promise.method(function (force) {
     var self = this;
 
-    var connecting = !!self.connection, // or connected
-        connected = connecting && self.connection.isResolved();
-    
-    if (connecting && !connected || connected && !force) {
-        return self.connection;
+    if (self.connection) {
+        if (!force || self.connection.isPending()) {
+            // already trying to connect, or already have a connection
+            // don't create multiple connections
+            return self.connection;
+        }
     }
     
-    function _error(err) {
-        self.log.error('Disconnected from RabbitMQ server:', err);
-    }
-    function _close() {
-        // if the connection closes, we want to reconnect and re-bind any
-        // consumers. Re-binding happens when a channel opens, so force
-        // a channel to open
-        self.log.trace('Connection closed unexpectedly, reconnecting');
-        self.getConnection(true);
-    }
+    function _reconnect() {
+        self.log.info('Reconnecting');
         
-    if (connected && force) {
-        self.log.trace('Forcing reconnection');
-        
-        var conn = self.connection.value();
-        
-        conn.removeListener('error', _error);
-        conn.removeListener('close', _close);
-        
+        var staleConnection = self.connection;
         self.connection = null;
-        self.asserted = false;
         
-        conn.close()
-        .catch(function (err) {
-            log.error('Couldn\'t close connection:', err);
+        return Promise.try(function () {
+            // first ensure the previous connection is closed
+            if (!staleConnection.isFulfilled()) {
+                return;
+            }
+            
+            var conn = staleConnection.value();
+        
+            conn.removeListener('error', _reconnect);
+            conn.removeListener('close', _reconnect);
+            
+            return Promise.try(function () {
+                return conn.close();
+            }).catch(function (err) {
+                self.log.warn('Failed to cleanly close connection: ' + err.message);
+            });
+        })
+        .then(function () {
+            // then create a new one, with an accumulating delay for retries
+            
+            var r = self.reconnect,
+                delay = r.current;
+
+            // set the delay for next time
+            r.current = Math.floor(
+                Math.min(
+                    r.max,
+                    Math.max( 
+                        delay,
+                        Math.random() * 4000 + 1000 + r.current
+                    )
+                )
+            );
+            
+            if (delay) { self.log.silly('Delaying connection for ' + (delay/1000) + 's'); }
+            
+            return Promise.delay(delay).then(function () {
+                return self.getConnection();
+            });
         });
-        
-        return self.getConnection();
     }
     
-    var r = this.reconnect, delay = r.current;
-    r.current = Math.min(Math.max(delay,1) * r.factor, r.max);
-
-    if (delay) { self.log.silly('Delaying connection for ' + (delay/1000) + 's'); }
+    if (force) {
+        self.log.silly('Forcing new connection');
+        return _reconnect();
+    }
     
-    self.connection = Promise.delay(delay).then(function () {
-        return amqp.connect(self.connectString, { ca: [self.caCert] })
-    }).tap(function (conn) {
-        self.log.silly('Connected successfully');
-        r.current = 0;
+    // we're starting from a new connection from here on, so assertions have not been run
+    self.asserted = false;
+    
+    // here, self.connection reflects the state of this single attempt to connect
+    // while the actual promise returned reflects the eventual connection to the server
+    // more specifically, self.connection can be pending, fulfilled, or rejected
+    // but the promise returned from Worker.getConnection() can only ever be
+    // pending or fulfilled
+    
+    self.connection = amqp.connect(self.connectString, { ca: [self.caCert] });
+
+    return self.connection.tap(function (conn) {
+        self.reconnect.current = 0;
         
-        conn.once('error', _error);
-        conn.once('close', _close);
-    }).catch(function (err) {
-        self.log.warn('Connection failed:', err);
-        // no forcing getChannel here because it's in the normal code flow
-        // on the way to that very thing
-        return self.getConnection(true);
-    });
-    return self.connection;
+        conn.once('error', _reconnect);
+        conn.once('close', _reconnect);
+    }).catch(_reconnect);
 });
 Worker.prototype.getChannel = Promise.method(function (force) {
     var self = this;
-    
-    var opening = !!self.channel, // or opened
-        opened = opening && self.channel.isResolved();
-    
-    if (opening && !opened || opened && !force) {
-        return self.channel;
+
+    if (self.channel) {
+        if (!force || self.channel.isPending()) {
+            // already trying to get a channel, or already have a channel
+            // don't create multiple channels
+            return self.channel;
+        }
     }
-    
-    function _error(err) {
-        self.log.error('Channel error:', err);
-        self.channel = null;
-        self.getChannel();
-    }
-    function _close() {
-        self.log.trace('Channel closed unexpectedly, reopening');
-        self.getChannel(true);
-    }
-    
-    if (opened && force) {
-        self.log.trace('Forcing new channel');
+
+    function _reconnect() {
+        self.log.info('Reopening channel');
         
-        var ch = self.channel.value();
-        
-        ch.removeListener('error', _error);
-        ch.removeListener('close', _close);
-        
+        var staleCh = self.channel;
         self.channel = null;
         
-        ch.close()
-        .catch(function (err) {
-            log.error('Couldn\'t close channel:', err);
-        });
+        return Promise.try(function () {
+            // first ensure the previous channel is closed
+            if (!staleCh.isFulfilled()) {
+                return;
+            }
+            
+            var ch = staleCh.value();
         
-        return self.getChannel();
-    }
-    
-    self.channel = self.getConnection(force).then(function (conn) {
-        return conn.createChannel();
-    }).then(function (ch) {
-        ch.once('error', _error);
-        ch.once('close', _close);
-        
-        if (self.asserted) { return ch; }
-        return self.setup(ch);
-    }).catch(function (err) {
-        self.log.warn('Create channel failed:', err);
-        
-        return self.getConnection(true)
+            ch.removeListener('error', _reconnect);
+            ch.removeListener('close', _reconnect);
+            
+            return Promise.try(function () {
+                return ch.close();
+            }).catch(function (err) {
+                self.log.warn('Failed to cleanly close channel: ' + err.message);
+            });
+        })
         .then(function () {
+            // no delay logic for channels
             return self.getChannel();
         });
-    });
+    }
     
-    return self.channel;
+    if (force) {
+        self.log.silly('Forcing new channel');
+        return _reconnect();
+    }
+
+    self.channel = self.getConnection()
+        .then(function (conn) {
+            return conn.createChannel();
+        });
+        
+    return self.channel
+        .tap(function (ch) {
+            ch.once('error', _reconnect);
+            ch.once('close', _reconnect);
+        
+            if (self.asserted) { return ch; }
+            return self.setup(ch);
+        }).catch(function (err) {
+            self.log.warn('Couldn\'t establish channel: ' + err.message);
+            return self.getConnection(true).then(_reconnect);
+        });
 });
