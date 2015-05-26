@@ -44,6 +44,7 @@ function Worker(config) {
     this.exchange = config.exchange || '';
     this.bindings = config.bindings || { };
     this.consumers = [ ];
+    this.consumeArgs = [ ];
     this.connection = null;
     this.channel = null;
     this.error = null; // set when setup() fails to prevent hammering
@@ -52,21 +53,47 @@ function Worker(config) {
 util.inherits(Worker, EventEmitter);
 
 var jobRE = /\.job$/;
-Worker.prototype.consume = Promise.method(function (queue, opts, fn) {
-    if (typeof opts === 'function') { fn = opts; opts = { }; }
+Worker.prototype.consume = Promise.method(function (/*queue, opts, fn, c*/) {
     var self = this;
-    return self.getChannel().then(function (ch) {
-        self.log.silly('binding consumer: ', queue);
-        
-        var consumer = new Consumer(fn, {
-            opts: opts.consumeOpts,
-            channel: ch,
-            exchange: self.exchange,
-            replyKey: opts.replyKey,
-            log: self.log
+    
+    var i = arguments.length, args = new Array(i);
+    while (i--) { args[i] = arguments[i]; }
+    
+    var queue, opts = { }, fn, c;
+    
+    if (typeof args[0] === 'string') { queue = args.shift(); }
+    if (typeof args[0] === 'object') { opts = args.shift(); }
+    if (typeof args[0] === 'function') { fn = args.shift(); }
+    if (args[0] instanceof Consumer) { c = args.shift(); }
+    
+    if (!queue || !fn) { throw new Error('Worker.consume: queue and fn are required'); }
+    
+    function bind() {
+        return self.getChannel().then(function (ch) {
+            var consumer = new Consumer(fn, {
+                opts: opts.consumeOpts,
+                channel: ch,
+                exchange: self.exchange,
+                replyKey: opts.replyKey,
+                log: self.log
+            });
+            
+            
+            return consumer.bind(queue)
+                .return(consumer);
+        }).catch(function (err) {
+            self.log.error('Bind failed: ' + err.toString());
         });
-        return consumer.bind(queue).then(function () {
-            self.consumers.push(consumer);
+    }
+    
+    var consumer = bind();
+    
+    self.on('rebind', function () {
+        consumer.then(function (c) {
+            if (c.state === 'unbound') {
+                self.log.silly('re-binding consumer: ' + queue);
+                consumer = bind();
+            }
         });
     });
 });
@@ -136,8 +163,7 @@ Worker.prototype.reset = function () {
 };
 Worker.prototype.setup = Promise.method(function (channel) {
     var self = this,
-        bindings = self.bindings,
-        consumers = self.consumers;
+        bindings = self.bindings;
     
     if (self.error) {
         self.log && self.log.warn('Attempting to set up previously failed connection', self.error);
@@ -177,11 +203,7 @@ Worker.prototype.setup = Promise.method(function (channel) {
     })
     .then(function () {
         self.asserted = true;
-        self.log.silly('consumers: ', consumers.map(function (c) { return c[0]; }));
-        return Promise.settle(consumers.map(function (args) {
-            self.log.silly('re-binding');
-            return self.consume.apply(self, args);
-        }));
+        self.emit('rebind');
     })
     .return(channel)
     .catch(function (err) {
@@ -220,7 +242,8 @@ Worker.prototype.getConnection = Promise.method(function (force) {
         }
     }
     
-    function _reconnect() {
+    function _reconnect(e) {
+        if (e) { self.log.warn(e); }
         self.log.info('Reconnecting');
         
         var staleConnection = self.connection;
@@ -282,7 +305,10 @@ Worker.prototype.getConnection = Promise.method(function (force) {
     // but the promise returned from Worker.getConnection() can only ever be
     // pending or fulfilled
     
-    self.connection = amqp.connect(self.connectString, { ca: [self.caCert] });
+    self.connection = amqp.connect(self.connectString, {
+        ca: [self.caCert],
+        rejectUnauthorized: false
+    });
 
     return self.connection.tap(function (conn) {
         self.reconnect.current = 0;

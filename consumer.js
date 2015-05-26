@@ -57,6 +57,7 @@ Consumer.prototype.bind = Promise.method(function (queue) {
     return ch.consume(queue, self.consumeHandler.bind(self), self.opts)
     .then(function (data) {
         self.consumerTag = data.consumerTag;
+        self.log.silly('bound '+queue+' -> '+data.consumerTag);
         self.state = 'bound';
     });
 });
