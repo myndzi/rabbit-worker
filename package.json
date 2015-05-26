@@ -13,7 +13,7 @@
     "bluebird": "^2.9.25",
     "deepcopy": "^0.3.3",
     "jquery-extend": "^2.0.3",
-    "logger": "git+ssh://git@github.com/myndzi/logger",
+    "logger": "git+ssh://git@github.com/myndzi/logger#public",
     "msgpack": "^0.2.3"
   }
 }
