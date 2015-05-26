@@ -142,6 +142,7 @@ Consumer.prototype.consumeHandler = function (msg) {
         ch.ack(msg);
     }).catch(NackError, function (err) {
         self.log.warn('Nacked: ' + err.message);
+        ch.nack(msg);
     }).catch(function (err)  {
         self.log.error('Other error:', err);
     });
