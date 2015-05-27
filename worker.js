@@ -305,10 +305,7 @@ Worker.prototype.getConnection = Promise.method(function (force) {
     // but the promise returned from Worker.getConnection() can only ever be
     // pending or fulfilled
     
-    self.connection = amqp.connect(self.connectString, {
-        ca: [self.caCert],
-        rejectUnauthorized: false
-    });
+    self.connection = amqp.connect(self.connectString, { ca: [self.caCert] });
 
     return self.connection.tap(function (conn) {
         self.reconnect.current = 0;
