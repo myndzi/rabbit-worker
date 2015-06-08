@@ -75,7 +75,8 @@ Worker.prototype.consume = Promise.method(function (/*queue, opts, fn, c*/) {
                 channel: ch,
                 exchange: self.exchange,
                 replyKey: opts.replyKey,
-                log: self.log
+                log: self.log,
+                prefetch: self.prefetch
             });
             
             
@@ -177,7 +178,10 @@ Worker.prototype.setup = Promise.method(function (channel) {
         self.log.silly('asserting exchange', exchg);
         self.log.trace('queues: ', queues);
         
-        if (self.prefetch) { channel.prefetch(self.prefetch); }
+        if (self.prefetch) {
+            self.log.trace('Setting prefetch: ', self.prefetch);
+            channel.prefetch(self.prefetch);
+        }
         return channel
             .assertExchange(exchg, 'topic')
             .thenReturn(queues)

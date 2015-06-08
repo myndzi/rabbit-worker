@@ -29,6 +29,7 @@ function Consumer(fn, opts) {
     
     // ch.consume options
     this.opts = opts.opts;
+    this.prefetch = opts.prefetch;
     
     // exchange and key to publish responses to
     this.exchange = opts.exchange;
@@ -43,6 +44,7 @@ Consumer.prototype.bind = Promise.method(function (queue) {
     if (self.state !== 'unbound') {
         throw new Error('Consumer.bind(): already bound');
     }
+    ch.prefetch(self.prefetch);
     
     ch.once('error', function (err) {
         self.log.warn('Channel error:', err);
@@ -134,10 +136,6 @@ Consumer.prototype.consumeHandler = function (msg) {
                 request: msg.content    }
         );
     }).then(function () {
-        if (!cancelled) { return; }
-        self.log.trace('Consumer cancelled');
-        return self.unbind();
-    }).then(function () {
         self.log.trace('Acking message');
         ch.ack(msg);
     }).catch(NackError, function (err) {
@@ -145,6 +143,10 @@ Consumer.prototype.consumeHandler = function (msg) {
         ch.nack(msg);
     }).catch(function (err)  {
         self.log.error('Other error:', err);
+    }).then(function () {
+        if (!cancelled) { return; }
+        self.log.trace('Consumer cancelled');
+        return self.unbind();
     });
 };
 Consumer.prototype.assertOnce = Promise.method(function (queueName, opts) {
